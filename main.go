@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -11,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/spf13/cobra"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/sync/semaphore"
@@ -28,79 +28,153 @@ var (
 	verbose     bool
 )
 
+var rootCmd = &cobra.Command{
+	Use:   "portscanner",
+	Short: "シンプルなポートスキャナ",
+	Long:  `IPアドレスやCIDR範囲を指定してポートスキャンを行うツールです。`,
+	Run: func(cmd *cobra.Command, args []string) {
+		// --- バリデーション強化 ---
+		if startPort < 1 || startPort > 65535 {
+			fmt.Println("開始ポートは1〜65535の範囲で指定してください")
+			os.Exit(1)
+		}
+		if endPort < 1 || endPort > 65535 {
+			fmt.Println("終了ポートは1〜65535の範囲で指定してください")
+			os.Exit(1)
+		}
+		if startPort > endPort {
+			fmt.Println("開始ポートは終了ポート以下にしてください")
+			os.Exit(1)
+		}
+		validProtocols := map[string]bool{"tcp": true, "udp": true, "both": true}
+		if !validProtocols[strings.ToLower(protocol)] {
+			fmt.Println("プロトコルは tcp, udp, both のいずれかで指定してください")
+			os.Exit(1)
+		}
+		validScanTypes := map[string]bool{"connect": true, "syn": true, "udp": true}
+		if !validScanTypes[strings.ToLower(scanType)] {
+			fmt.Println("スキャンタイプは connect, syn, udp のいずれかで指定してください")
+			os.Exit(1)
+		}
+		if strings.Contains(targetIP, "/") {
+			if _, _, err := net.ParseCIDR(targetIP); err != nil {
+				fmt.Println("CIDR表記が不正です")
+				os.Exit(1)
+			}
+		} else {
+			if len(targetIP) == 1 || strings.HasPrefix(targetIP, "-") {
+				fmt.Println("-iフラグの指定方法が間違っている可能性があります。正しくは -i 192.168.x.x のように指定してください")
+				os.Exit(1)
+			}
+			if net.ParseIP(targetIP) == nil {
+				fmt.Println("IPアドレスの形式が不正です")
+				os.Exit(1)
+			}
+		}
+		if scanSpeed < 1 || scanSpeed > 3 {
+			fmt.Println("スキャンスピードは1〜3の範囲で指定してください")
+			os.Exit(1)
+		}
+		// 各フラグの指定方法ミスを検出
+		if strings.HasPrefix(cmd.Flag("i").Value.String(), "-") {
+			fmt.Println("-iフラグの指定方法が間違っている可能性があります。正しくは -i 192.168.x.x のように指定してください")
+			os.Exit(1)
+		}
+		if strings.HasPrefix(cmd.Flag("s").Value.String(), "-") {
+			fmt.Println("-sフラグの指定方法が間違っている可能性があります。正しくは -s 1 のように指定してください")
+			os.Exit(1)
+		}
+		if strings.HasPrefix(cmd.Flag("e").Value.String(), "-") {
+			fmt.Println("-eフラグの指定方法が間違っている可能性があります。正しくは -e 1000 のように指定してください")
+			os.Exit(1)
+		}
+		if strings.HasPrefix(cmd.Flag("t").Value.String(), "-") {
+			fmt.Println("-tフラグの指定方法が間違っている可能性があります。正しくは -t connect のように指定してください")
+			os.Exit(1)
+		}
+		if strings.HasPrefix(cmd.Flag("p").Value.String(), "-") {
+			fmt.Println("-pフラグの指定方法が間違っている可能性があります。正しくは -p tcp のように指定してください")
+			os.Exit(1)
+		}
+		if strings.HasPrefix(cmd.Flag("S").Value.String(), "-") {
+			fmt.Println("-Sフラグの指定方法が間違っている可能性があります。正しくは -S 2 のように指定してください")
+			os.Exit(1)
+		}
+		// --- ここまでバリデーション ---
+
+		// スキャンスピードに基づいて設定を調整
+		switch scanSpeed {
+		case 1:
+			timeout = 2 * time.Second
+			workerCount = 10
+		case 2:
+			timeout = 1 * time.Second
+			workerCount = 50
+		case 3:
+			timeout = 500 * time.Millisecond
+			workerCount = 100
+		default:
+			fmt.Println("無効なスピード設定です。デフォルト(2)を使用します")
+			timeout = 1 * time.Second
+			workerCount = 50
+		}
+
+		// 入力検証
+		if targetIP == "" {
+			fmt.Println("Usage: portscanner -i [IPアドレス/CIDR] -s [開始ポート] -e [終了ポート] -t [connect/syn/udp] -p [tcp/udp/both] -S [1-3]")
+			os.Exit(1)
+		}
+
+		// CIDRチェック (ネットワークスキャン)
+		if strings.Contains(targetIP, "/") {
+			hosts := expandCIDR(targetIP)
+			fmt.Printf("ネットワーク %s 内のホストを探索中...\n", targetIP)
+			discoveredHosts := discoverHosts(hosts)
+
+			if len(discoveredHosts) == 0 {
+				fmt.Println("アクティブなホストが見つかりませんでした")
+				return
+			}
+
+			fmt.Printf("%d台のアクティブホストを発見しました\n", len(discoveredHosts))
+			for _, host := range discoveredHosts {
+				fmt.Printf("ホスト %s のポートスキャンを開始します\n", host)
+				scanPorts(host)
+				fmt.Println()
+			}
+		} else {
+			// 単一ホストスキャン
+			scanPorts(targetIP)
+		}
+	},
+}
+
 func init() {
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "\nポートスキャナ ヘルプ\n\n")
-		fmt.Fprintf(os.Stderr, "使い方: %s [オプション]\n\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "オプション:\n")
-		fmt.Fprintf(os.Stderr, "  -ip string\tスキャン対象のIPアドレスまたはCIDR範囲（例: 192.168.1.1 または 192.168.1.0/24）【必須】\n")
-		fmt.Fprintf(os.Stderr, "  -start int\tスキャン開始ポート (デフォルト: 1)\n")
-		fmt.Fprintf(os.Stderr, "  -end int\tスキャン終了ポート (デフォルト: 1000)\n")
-		fmt.Fprintf(os.Stderr, "  -type string\tスキャンタイプ (connect, syn, udp) (デフォルト: connect)\n")
-		fmt.Fprintf(os.Stderr, "  -proto string\tプロトコル (tcp, udp, both) (デフォルト: tcp)\n")
-		fmt.Fprintf(os.Stderr, "  -speed int\tスキャンスピード (1=遅い, 2=普通, 3=速い) (デフォルト: 2)\n")
-		fmt.Fprintf(os.Stderr, "  -v\t\t詳細出力を有効化\n")
-		fmt.Fprintf(os.Stderr, "  -h, --help\tこのヘルプを表示\n\n")
-		fmt.Fprintf(os.Stderr, "例:\n")
-		fmt.Fprintf(os.Stderr, "  %s -ip 192.168.1.1 -start 1 -end 1000\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s -ip 192.168.1.0/24 -proto both -speed 3\n", os.Args[0])
-	}
+	rootCmd.PersistentFlags().StringVarP(&targetIP, "i", "i", "", "スキャン対象のIPアドレスまたはCIDR範囲（例: 192.168.1.1 または 192.168.1.0/24）【必須】")
+	rootCmd.PersistentFlags().IntVarP(&startPort, "s", "s", 1, "スキャン開始ポート (デフォルト: 1)")
+	rootCmd.PersistentFlags().IntVarP(&endPort, "e", "e", 1000, "スキャン終了ポート (デフォルト: 1000)")
+	rootCmd.PersistentFlags().StringVarP(&scanType, "t", "t", "connect", "スキャンタイプ (connect, syn, udp) (デフォルト: connect)")
+	rootCmd.PersistentFlags().StringVarP(&protocol, "p", "p", "tcp", "プロトコル (tcp, udp, both) (デフォルト: tcp)")
+	rootCmd.PersistentFlags().IntVarP(&scanSpeed, "S", "S", 2, "スキャンスピード (1=遅い, 2=普通, 3=速い) (デフォルト: 2)")
+	rootCmd.PersistentFlags().BoolVarP(&verbose, "v", "v", false, "詳細出力を有効化")
+
+	rootCmd.MarkPersistentFlagRequired("i")
 }
 
 func main() {
-	// コマンドライン引数の解析
-	flag.StringVar(&targetIP, "ip", "", "スキャン対象のIPアドレスまたはCIDR範囲（例: 192.168.1.1 または 192.168.1.0/24）")
-	flag.IntVar(&startPort, "start", 1, "スキャン開始ポート")
-	flag.IntVar(&endPort, "end", 1000, "スキャン終了ポート")
-	flag.StringVar(&scanType, "type", "connect", "スキャンタイプ (connect, syn, udp)")
-	flag.StringVar(&protocol, "proto", "tcp", "プロトコル (tcp, udp, both)")
-	flag.IntVar(&scanSpeed, "speed", 2, "スキャンスピード (1=遅い, 2=普通, 3=速い)")
-	flag.BoolVar(&verbose, "v", false, "詳細出力")
-	flag.Parse()
+	// 既存のflagパース処理は一旦コメントアウト
+	// flag.StringVar(&targetIP, "ip", "", "スキャン対象のIPアドレスまたはCIDR範囲（例: 192.168.1.1 または 192.168.1.0/24）")
+	// flag.IntVar(&startPort, "start", 1, "スキャン開始ポート")
+	// flag.IntVar(&endPort, "end", 1000, "スキャン終了ポート")
+	// flag.StringVar(&scanType, "type", "connect", "スキャンタイプ (connect, syn, udp)")
+	// flag.StringVar(&protocol, "proto", "tcp", "プロトコル (tcp, udp, both)")
+	// flag.IntVar(&scanSpeed, "speed", 2, "スキャンスピード (1=遅い, 2=普通, 3=速い)")
+	// flag.BoolVar(&verbose, "v", false, "詳細出力")
+	// flag.Parse()
 
-	// スキャンスピードに基づいて設定を調整
-	switch scanSpeed {
-	case 1:
-		timeout = 2 * time.Second
-		workerCount = 10
-	case 2:
-		timeout = 1 * time.Second
-		workerCount = 50
-	case 3:
-		timeout = 500 * time.Millisecond
-		workerCount = 100
-	default:
-		fmt.Println("無効なスピード設定です。デフォルト(2)を使用します")
-		timeout = 1 * time.Second
-		workerCount = 50
-	}
-
-	// 入力検証
-	if targetIP == "" {
-		fmt.Println("Usage: portscanner -ip [IPアドレス/CIDR] -start [開始ポート] -end [終了ポート] -type [connect/syn/udp] -proto [tcp/udp/both] -speed [1-3]")
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Println(err)
 		os.Exit(1)
-	}
-
-	// CIDRチェック (ネットワークスキャン)
-	if strings.Contains(targetIP, "/") {
-		hosts := expandCIDR(targetIP)
-		fmt.Printf("ネットワーク %s 内のホストを探索中...\n", targetIP)
-		discoveredHosts := discoverHosts(hosts)
-
-		if len(discoveredHosts) == 0 {
-			fmt.Println("アクティブなホストが見つかりませんでした")
-			return
-		}
-
-		fmt.Printf("%d台のアクティブホストを発見しました\n", len(discoveredHosts))
-		for _, host := range discoveredHosts {
-			fmt.Printf("ホスト %s のポートスキャンを開始します\n", host)
-			scanPorts(host)
-			fmt.Println()
-		}
-	} else {
-		// 単一ホストスキャン
-		scanPorts(targetIP)
 	}
 }
 
