@@ -1,0 +1,54 @@
+version: "2"
+
+run:
+  timeout: 3m
+  tests: true              # *_test.go も解析
+  modules-download-mode: readonly
+
+linters:
+  # 標準セットに加えて必要なリンターを明示的に有効化
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - unused
+    - revive
+    - gocyclo
+    - gosec
+    - errname
+  exclusions:
+    paths:
+      - bin
+      - ".*_generated.go$"
+    rules:
+      - linters: [revive]
+        text: "don't use underscores"
+    generated: strict
+  settings:
+    gocyclo:
+      min-complexity: 15
+    revive:
+      severity: warning
+      confidence: 0.8
+      rules:
+        - name: indent-error-flow
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  uniq-by-line: true
+
+output:
+  formats:
+    text:
+      path: stdout
+      colors: true
+      print-issued-lines: false 
