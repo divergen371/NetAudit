@@ -1,17 +1,20 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
 	"net"
-	"net/netip"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/mdlayher/arp"
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
+	"github.com/google/gopacket/pcap"
 	"github.com/spf13/cobra"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
@@ -28,6 +31,7 @@ var (
 	timeout     time.Duration
 	workerCount int64
 	verbose     bool
+	ifaceName   string
 )
 
 var rootCmd = &cobra.Command{
@@ -159,6 +163,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&protocol, "p", "p", "tcp", "プロトコル (tcp, udp, both) (デフォルト: tcp)")
 	rootCmd.PersistentFlags().IntVarP(&scanSpeed, "S", "S", 2, "スキャンスピード (1=遅い, 2=普通, 3=速い) (デフォルト: 2)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "v", "v", false, "詳細出力を有効化")
+	rootCmd.PersistentFlags().StringVarP(&ifaceName, "I", "I", "", "利用するネットワークインターフェース名（例: eth0, en0 など）")
 
 	rootCmd.MarkPersistentFlagRequired("i")
 }
@@ -289,36 +294,99 @@ func pingHost(ip string) bool {
 }
 
 func arpScan(ip string) bool {
-	ifaceName := "en0" // 利用環境に応じて変更してください（例: "eth0"）
+	iface := selectInterface()
+	switch runtime.GOOS {
+	case "linux":
+		// gopacketでARPリクエスト送信・応答受信
+		return arpScanGopacket(iface, ip)
+	case "darwin", "windows":
+		return arpScanGopacket(iface, ip)
+	default:
+		fmt.Println("このOSには対応していません")
+		return false
+	}
+}
+
+// gopacketを使ったARPリクエスト送信・応答受信の雛形
+func arpScanGopacket(ifaceName, targetIP string) bool {
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
 		fmt.Printf("インターフェース %s が見つかりません: %v\n", ifaceName, err)
 		return false
 	}
-	c, err := arp.Dial(iface)
-	if err != nil {
-		fmt.Printf("ARPダイアル失敗: %v\n", err)
+	localMAC := iface.HardwareAddr
+	var localIP net.IP
+	addrs, _ := iface.Addrs()
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
+			localIP = ipnet.IP
+			break
+		}
+	}
+	if localIP == nil {
+		fmt.Println("IPv4アドレスが見つかりません")
 		return false
 	}
-	defer c.Close()
-	target := net.ParseIP(ip)
+	fmt.Printf("選択インターフェース: %s\n", ifaceName)
+	fmt.Printf("ローカルIP: %s, MAC: %s\n", localIP, localMAC)
+
+	handle, err := pcap.OpenLive(ifaceName, 65536, true, pcap.BlockForever)
+	if err != nil {
+		fmt.Printf("pcap.OpenLive失敗: %v\n", err)
+		return false
+	}
+	defer handle.Close()
+
+	target := net.ParseIP(targetIP)
 	if target == nil {
-		fmt.Println("IPアドレスのパースに失敗しました")
+		fmt.Println("ターゲットIPのパースに失敗しました")
 		return false
 	}
-	target4 := target.To4()
-	if target4 == nil {
-		fmt.Println("IPv4アドレスのみ対応しています")
+
+	eth := layers.Ethernet{
+		SrcMAC:       localMAC,
+		DstMAC:       net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+		EthernetType: layers.EthernetTypeARP,
+	}
+	arpLayer := layers.ARP{
+		AddrType:          layers.LinkTypeEthernet,
+		Protocol:          layers.EthernetTypeIPv4,
+		HwAddressSize:     6,
+		ProtAddressSize:   4,
+		Operation:         layers.ARPRequest,
+		SourceHwAddress:   []byte(localMAC),
+		SourceProtAddress: []byte(localIP.To4()),
+		DstHwAddress:      []byte{0, 0, 0, 0, 0, 0},
+		DstProtAddress:    []byte(target.To4()),
+	}
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	if err := gopacket.SerializeLayers(buf, opts, &eth, &arpLayer); err != nil {
+		fmt.Printf("パケット生成失敗: %v\n", err)
 		return false
 	}
-	addr, err := netip.ParseAddr(target4.String())
-	if err != nil {
-		fmt.Println("netip.Addrへの変換に失敗しました")
+	if err := handle.WritePacketData(buf.Bytes()); err != nil {
+		fmt.Printf("パケット送信失敗: %v\n", err)
 		return false
 	}
-	c.SetDeadline(time.Now().Add(1 * time.Second))
-	_, err = c.Resolve(addr)
-	return err == nil
+
+	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+	timeoutCh := time.After(2 * time.Second)
+	for {
+		select {
+		case packet := <-packetSource.Packets():
+			if arpLayer := packet.Layer(layers.LayerTypeARP); arpLayer != nil {
+				arp, _ := arpLayer.(*layers.ARP)
+				if arp.Operation == layers.ARPReply && net.IP(arp.SourceProtAddress).Equal(target) {
+					fmt.Printf("%s is at %s\n", target, net.HardwareAddr(arp.SourceHwAddress))
+					return true
+				}
+			}
+		case <-timeoutCh:
+			fmt.Println("ARP応答がありませんでした")
+			return false
+		}
+	}
 }
 
 func attemptConnect(ip string, port int) bool {
@@ -486,4 +554,63 @@ func getServiceName(protocol string, port int) string {
 
 func isLinux() bool {
 	return os.Getenv("OS") != "Windows_NT"
+}
+
+func selectInterface() string {
+	if ifaceName != "" {
+		return ifaceName
+	}
+	devices, err := pcap.FindAllDevs()
+	if err != nil {
+		fmt.Printf("インターフェース列挙に失敗: %v\n", err)
+		os.Exit(1)
+	}
+	candidates := []pcap.Interface{}
+	for _, dev := range devices {
+		if strings.Contains(dev.Name, "lo") {
+			continue
+		}
+		iface, err := net.InterfaceByName(dev.Name)
+		if err != nil || len(iface.HardwareAddr) == 0 {
+			continue
+		}
+		hasIPv4 := false
+		for _, addr := range dev.Addresses {
+			if addr.IP.To4() != nil {
+				hasIPv4 = true
+				break
+			}
+		}
+		if !hasIPv4 {
+			continue
+		}
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagBroadcast == 0 {
+			continue
+		}
+		candidates = append(candidates, dev)
+	}
+	if len(candidates) == 0 {
+		fmt.Println("利用可能なインターフェースが見つかりませんでした")
+		os.Exit(1)
+	}
+	if len(candidates) == 1 {
+		return candidates[0].Name
+	}
+	fmt.Println("利用可能なインターフェース:")
+	for i, dev := range candidates {
+		fmt.Printf("[%d] %s (%s)\n", i, dev.Name, dev.Description)
+	}
+	fmt.Print("番号を選択してください: ")
+	reader := bufio.NewReader(os.Stdin)
+	var idx int
+	for {
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		_, err := fmt.Sscanf(input, "%d", &idx)
+		if err == nil && idx >= 0 && idx < len(candidates) {
+			break
+		}
+		fmt.Print("正しい番号を入力してください: ")
+	}
+	return candidates[idx].Name
 }
