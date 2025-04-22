@@ -1,0 +1,25 @@
+# Goビルド成果物
+NetAudit
+*.out
+*.exe
+*.test
+
+# カバレッジレポート
+coverage*
+*.coverprofile
+
+# OS固有ファイル
+.DS_Store
+Thumbs.db
+
+# エディタ/IDE
+.vscode/
+.idea/
+*.swp
+
+# ログ・一時ファイル
+*.log
+*.tmp
+
+# Specstory履歴
+.specstory/history/ 

@@ -28,6 +28,25 @@ var (
 	verbose     bool
 )
 
+func init() {
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "\nポートスキャナ ヘルプ\n\n")
+		fmt.Fprintf(os.Stderr, "使い方: %s [オプション]\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "オプション:\n")
+		fmt.Fprintf(os.Stderr, "  -ip string\tスキャン対象のIPアドレスまたはCIDR範囲（例: 192.168.1.1 または 192.168.1.0/24）【必須】\n")
+		fmt.Fprintf(os.Stderr, "  -start int\tスキャン開始ポート (デフォルト: 1)\n")
+		fmt.Fprintf(os.Stderr, "  -end int\tスキャン終了ポート (デフォルト: 1000)\n")
+		fmt.Fprintf(os.Stderr, "  -type string\tスキャンタイプ (connect, syn, udp) (デフォルト: connect)\n")
+		fmt.Fprintf(os.Stderr, "  -proto string\tプロトコル (tcp, udp, both) (デフォルト: tcp)\n")
+		fmt.Fprintf(os.Stderr, "  -speed int\tスキャンスピード (1=遅い, 2=普通, 3=速い) (デフォルト: 2)\n")
+		fmt.Fprintf(os.Stderr, "  -v\t\t詳細出力を有効化\n")
+		fmt.Fprintf(os.Stderr, "  -h, --help\tこのヘルプを表示\n\n")
+		fmt.Fprintf(os.Stderr, "例:\n")
+		fmt.Fprintf(os.Stderr, "  %s -ip 192.168.1.1 -start 1 -end 1000\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -ip 192.168.1.0/24 -proto both -speed 3\n", os.Args[0])
+	}
+}
+
 func main() {
 	// コマンドライン引数の解析
 	flag.StringVar(&targetIP, "ip", "", "スキャン対象のIPアドレスまたはCIDR範囲（例: 192.168.1.1 または 192.168.1.0/24）")
@@ -58,7 +77,7 @@ func main() {
 
 	// 入力検証
 	if targetIP == "" {
-		fmt.Println("使用法: portscanner -ip [IPアドレス/CIDR] -start [開始ポート] -end [終了ポート] -type [connect/syn/udp] -proto [tcp/udp/both] -speed [1-3]")
+		fmt.Println("Usage: portscanner -ip [IPアドレス/CIDR] -start [開始ポート] -end [終了ポート] -type [connect/syn/udp] -proto [tcp/udp/both] -speed [1-3]")
 		os.Exit(1)
 	}
 
