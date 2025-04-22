@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/mdlayher/arp"
 	"github.com/spf13/cobra"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
@@ -287,12 +289,36 @@ func pingHost(ip string) bool {
 }
 
 func arpScan(ip string) bool {
-	// 実際のARPスキャンはOSに依存するためここでは簡略化
-	// TODO 実装を検討
-	if isLinux() {
-		return attemptConnect(ip, 22) || attemptConnect(ip, 80) || attemptConnect(ip, 443)
+	ifaceName := "en0" // 利用環境に応じて変更してください（例: "eth0"）
+	iface, err := net.InterfaceByName(ifaceName)
+	if err != nil {
+		fmt.Printf("インターフェース %s が見つかりません: %v\n", ifaceName, err)
+		return false
 	}
-	return false
+	c, err := arp.Dial(iface)
+	if err != nil {
+		fmt.Printf("ARPダイアル失敗: %v\n", err)
+		return false
+	}
+	defer c.Close()
+	target := net.ParseIP(ip)
+	if target == nil {
+		fmt.Println("IPアドレスのパースに失敗しました")
+		return false
+	}
+	target4 := target.To4()
+	if target4 == nil {
+		fmt.Println("IPv4アドレスのみ対応しています")
+		return false
+	}
+	addr, err := netip.ParseAddr(target4.String())
+	if err != nil {
+		fmt.Println("netip.Addrへの変換に失敗しました")
+		return false
+	}
+	c.SetDeadline(time.Now().Add(1 * time.Second))
+	_, err = c.Resolve(addr)
+	return err == nil
 }
 
 func attemptConnect(ip string, port int) bool {
