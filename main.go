@@ -21,191 +21,162 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
-var (
-	scanType    string
-	startPort   int
-	endPort     int
-	targetIP    string
-	scanSpeed   int
-	protocol    string
-	timeout     time.Duration
-	workerCount int64
-	verbose     bool
-	ifaceName   string
-)
+// Config構造体はCLIオプションとスキャン設定を保持する
+// この構造体を使ってグローバル変数を排除し、テストや保守性を向上させる
+
+type Config struct {
+	TargetIP    string
+	StartPort   int
+	EndPort     int
+	ScanType    string
+	Protocol    string
+	ScanSpeed   int
+	Verbose     bool
+	IfaceName   string
+	Timeout     time.Duration
+	WorkerCount int64
+}
+
+var cfg Config
 
 var rootCmd = &cobra.Command{
 	Use:   "portscanner",
 	Short: "シンプルなポートスキャナ",
-	Long:  `IPアドレスやCIDR範囲を指定してポートスキャンを行うツールです。`,
+	Long:  "IPアドレスやCIDR範囲を指定してポートスキャンを行うツールです.",
 	Run: func(cmd *cobra.Command, args []string) {
-		// --- バリデーション強化 ---
-		if startPort < 1 || startPort > 65535 {
-			fmt.Println("開始ポートは1〜65535の範囲で指定してください")
+		if err := cfg.validate(); err != nil {
+			fmt.Println(err)
 			os.Exit(1)
 		}
-		if endPort < 1 || endPort > 65535 {
-			fmt.Println("終了ポートは1〜65535の範囲で指定してください")
-			os.Exit(1)
-		}
-		if startPort > endPort {
-			fmt.Println("開始ポートは終了ポート以下にしてください")
-			os.Exit(1)
-		}
-		validProtocols := map[string]bool{"tcp": true, "udp": true, "both": true}
-		if !validProtocols[strings.ToLower(protocol)] {
-			fmt.Println("プロトコルは tcp, udp, both のいずれかで指定してください")
-			os.Exit(1)
-		}
-		validScanTypes := map[string]bool{"connect": true, "syn": true, "udp": true}
-		if !validScanTypes[strings.ToLower(scanType)] {
-			fmt.Println("スキャンタイプは connect, syn, udp のいずれかで指定してください")
-			os.Exit(1)
-		}
-		if strings.Contains(targetIP, "/") {
-			if _, _, err := net.ParseCIDR(targetIP); err != nil {
-				fmt.Println("CIDR表記が不正です")
-				os.Exit(1)
-			}
-		} else {
-			if len(targetIP) == 1 || strings.HasPrefix(targetIP, "-") {
-				fmt.Println("-iフラグの指定方法が間違っている可能性があります。正しくは -i 192.168.x.x のように指定してください")
-				os.Exit(1)
-			}
-			if net.ParseIP(targetIP) == nil {
-				fmt.Println("IPアドレスの形式が不正です")
-				os.Exit(1)
-			}
-		}
-		if scanSpeed < 1 || scanSpeed > 3 {
-			fmt.Println("スキャンスピードは1〜3の範囲で指定してください")
-			os.Exit(1)
-		}
-		// 各フラグの指定方法ミスを検出
-		if strings.HasPrefix(cmd.Flag("i").Value.String(), "-") {
-			fmt.Println("-iフラグの指定方法が間違っている可能性があります。正しくは -i 192.168.x.x のように指定してください")
-			os.Exit(1)
-		}
-		if strings.HasPrefix(cmd.Flag("s").Value.String(), "-") {
-			fmt.Println("-sフラグの指定方法が間違っている可能性があります。正しくは -s 1 のように指定してください")
-			os.Exit(1)
-		}
-		if strings.HasPrefix(cmd.Flag("e").Value.String(), "-") {
-			fmt.Println("-eフラグの指定方法が間違っている可能性があります。正しくは -e 1000 のように指定してください")
-			os.Exit(1)
-		}
-		if strings.HasPrefix(cmd.Flag("t").Value.String(), "-") {
-			fmt.Println("-tフラグの指定方法が間違っている可能性があります。正しくは -t connect のように指定してください")
-			os.Exit(1)
-		}
-		if strings.HasPrefix(cmd.Flag("p").Value.String(), "-") {
-			fmt.Println("-pフラグの指定方法が間違っている可能性があります。正しくは -p tcp のように指定してください")
-			os.Exit(1)
-		}
-		if strings.HasPrefix(cmd.Flag("S").Value.String(), "-") {
-			fmt.Println("-Sフラグの指定方法が間違っている可能性があります。正しくは -S 2 のように指定してください")
-			os.Exit(1)
-		}
-		// --- ここまでバリデーション ---
-
-		// スキャンスピードに基づいて設定を調整
-		switch scanSpeed {
-		case 1:
-			timeout = 2 * time.Second
-			workerCount = 10
-		case 2:
-			timeout = 1 * time.Second
-			workerCount = 50
-		case 3:
-			timeout = 500 * time.Millisecond
-			workerCount = 100
-		default:
-			fmt.Println("無効なスピード設定です。デフォルト(2)を使用します")
-			timeout = 1 * time.Second
-			workerCount = 50
-		}
-
-		// 入力検証
-		if targetIP == "" {
-			fmt.Println("Usage: portscanner -i [IPアドレス/CIDR] -s [開始ポート] -e [終了ポート] -t [connect/syn/udp] -p [tcp/udp/both] -S [1-3]")
-			os.Exit(1)
-		}
-
-		// CIDRチェック (ネットワークスキャン)
-		if strings.Contains(targetIP, "/") {
-			hosts := expandCIDR(targetIP)
-			fmt.Printf("ネットワーク %s 内のホストを探索中...\n", targetIP)
-			discoveredHosts := discoverHosts(hosts)
-
-			if len(discoveredHosts) == 0 {
-				fmt.Println("アクティブなホストが見つかりませんでした")
-				return
-			}
-
-			fmt.Printf("%d台のアクティブホストを発見しました\n", len(discoveredHosts))
-			for _, host := range discoveredHosts {
-				fmt.Printf("ホスト %s のポートスキャンを開始します\n", host)
-				scanPorts(host)
-				fmt.Println()
-			}
-		} else {
-			// 単一ホストスキャン
-			scanPorts(targetIP)
-		}
+		cfg.adjustSettings()
+		runScan(&cfg)
 	},
 }
 
 func init() {
-	rootCmd.PersistentFlags().StringVarP(&targetIP, "i", "i", "", "スキャン対象のIPアドレスまたはCIDR範囲（例: 192.168.1.1 または 192.168.1.0/24）【必須】")
-	rootCmd.PersistentFlags().IntVarP(&startPort, "s", "s", 1, "スキャン開始ポート (デフォルト: 1)")
-	rootCmd.PersistentFlags().IntVarP(&endPort, "e", "e", 1000, "スキャン終了ポート (デフォルト: 1000)")
-	rootCmd.PersistentFlags().StringVarP(&scanType, "t", "t", "connect", "スキャンタイプ (connect, syn, udp) (デフォルト: connect)")
-	rootCmd.PersistentFlags().StringVarP(&protocol, "p", "p", "tcp", "プロトコル (tcp, udp, both) (デフォルト: tcp)")
-	rootCmd.PersistentFlags().IntVarP(&scanSpeed, "S", "S", 2, "スキャンスピード (1=遅い, 2=普通, 3=速い) (デフォルト: 2)")
-	rootCmd.PersistentFlags().BoolVarP(&verbose, "v", "v", false, "詳細出力を有効化")
-	rootCmd.PersistentFlags().StringVarP(&ifaceName, "I", "I", "", "利用するネットワークインターフェース名（例: eth0, en0 など）")
+	rootCmd.PersistentFlags().StringVarP(&cfg.TargetIP, "i", "i", "", "スキャン対象のIPアドレスまたはCIDR範囲（例: 192.168.1.1 または 192.168.1.0/24）【必須】")
+	rootCmd.PersistentFlags().IntVarP(&cfg.StartPort, "s", "s", 1, "スキャン開始ポート (デフォルト: 1)")
+	rootCmd.PersistentFlags().IntVarP(&cfg.EndPort, "e", "e", 1000, "スキャン終了ポート (デフォルト: 1000)")
+	rootCmd.PersistentFlags().StringVarP(&cfg.ScanType, "t", "t", "connect", "スキャンタイプ (connect, syn, udp) (デフォルト: connect)")
+	rootCmd.PersistentFlags().StringVarP(&cfg.Protocol, "p", "p", "tcp", "プロトコル (tcp, udp, both) (デフォルト: tcp)")
+	rootCmd.PersistentFlags().IntVarP(&cfg.ScanSpeed, "S", "S", 2, "スキャンスピード (1=遅い, 2=普通, 3=速い) (デフォルト: 2)")
+	rootCmd.PersistentFlags().BoolVarP(&cfg.Verbose, "v", "v", false, "詳細出力を有効化")
+	rootCmd.PersistentFlags().StringVarP(&cfg.IfaceName, "I", "I", "", "利用するネットワークインターフェース名（例: eth0, en0 など）")
 
 	rootCmd.MarkPersistentFlagRequired("i")
 }
 
 func main() {
-	// 既存のflagパース処理は一旦コメントアウト
-	// flag.StringVar(&targetIP, "ip", "", "スキャン対象のIPアドレスまたはCIDR範囲（例: 192.168.1.1 または 192.168.1.0/24）")
-	// flag.IntVar(&startPort, "start", 1, "スキャン開始ポート")
-	// flag.IntVar(&endPort, "end", 1000, "スキャン終了ポート")
-	// flag.StringVar(&scanType, "type", "connect", "スキャンタイプ (connect, syn, udp)")
-	// flag.StringVar(&protocol, "proto", "tcp", "プロトコル (tcp, udp, both)")
-	// flag.IntVar(&scanSpeed, "speed", 2, "スキャンスピード (1=遅い, 2=普通, 3=速い)")
-	// flag.BoolVar(&verbose, "v", false, "詳細出力")
-	// flag.Parse()
-
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
 }
 
+// validateは設定値の入力検証を行う
+func (cfg *Config) validate() error {
+	if cfg.StartPort < 1 || cfg.StartPort > 65535 {
+		return fmt.Errorf("開始ポートは1〜65535の範囲で指定してください")
+	}
+	if cfg.EndPort < 1 || cfg.EndPort > 65535 {
+		return fmt.Errorf("終了ポートは1〜65535の範囲で指定してください")
+	}
+	if cfg.StartPort > cfg.EndPort {
+		return fmt.Errorf("開始ポートは終了ポート以下にしてください")
+	}
+	validProtocols := map[string]bool{"tcp": true, "udp": true, "both": true}
+	if !validProtocols[strings.ToLower(cfg.Protocol)] {
+		return fmt.Errorf("プロトコルは tcp, udp, both のいずれかで指定してください")
+	}
+	validScanTypes := map[string]bool{"connect": true, "syn": true, "udp": true}
+	if !validScanTypes[strings.ToLower(cfg.ScanType)] {
+		return fmt.Errorf("スキャンタイプは connect, syn, udp のいずれかで指定してください")
+	}
+	if strings.Contains(cfg.TargetIP, "/") {
+		if _, _, err := net.ParseCIDR(cfg.TargetIP); err != nil {
+			return fmt.Errorf("CIDR表記が不正です")
+		}
+	} else {
+		if len(cfg.TargetIP) == 1 || strings.HasPrefix(cfg.TargetIP, "-") {
+			return fmt.Errorf("-iフラグの指定方法が間違っている可能性があります。正しくは -i 192.168.x.x のように指定してください")
+		}
+		if net.ParseIP(cfg.TargetIP) == nil {
+			return fmt.Errorf("IPアドレスの形式が不正です")
+		}
+	}
+	if cfg.ScanSpeed < 1 || cfg.ScanSpeed > 3 {
+		return fmt.Errorf("スキャンスピードは1〜3の範囲で指定してください")
+	}
+	if cfg.TargetIP == "" {
+		return fmt.Errorf("Usage: portscanner -i [IPアドレス/CIDR] -s [開始ポート] -e [終了ポート] -t [connect/syn/udp] -p [tcp/udp/both] -S [1-3]")
+	}
+	return nil
+}
+
+// adjustSettingsはスキャン速度に応じてタイムアウトとワーカー数を設定する
+func (cfg *Config) adjustSettings() {
+	switch cfg.ScanSpeed {
+	case 1:
+		cfg.Timeout = 2 * time.Second
+		cfg.WorkerCount = 10
+	case 2:
+		cfg.Timeout = 1 * time.Second
+		cfg.WorkerCount = 50
+	case 3:
+		cfg.Timeout = 500 * time.Millisecond
+		cfg.WorkerCount = 100
+	default:
+		fmt.Println("無効なスピード設定です。デフォルト(2)を使用します")
+		cfg.Timeout = 1 * time.Second
+		cfg.WorkerCount = 50
+	}
+}
+
+// runScanは設定に基づいてスキャン処理を実行する
+func runScan(cfg *Config) {
+	if strings.Contains(cfg.TargetIP, "/") {
+		hosts := expandCIDR(cfg.TargetIP)
+		fmt.Printf("ネットワーク %s 内のホストを探索中...\n", cfg.TargetIP)
+		discoveredHosts := discoverHosts(hosts, cfg)
+		if len(discoveredHosts) == 0 {
+			fmt.Println("アクティブなホストが見つかりませんでした")
+			return
+		}
+		fmt.Printf("%d台のアクティブホストを発見しました\n", len(discoveredHosts))
+		for _, host := range discoveredHosts {
+			fmt.Printf("ホスト %s のポートスキャンを開始します\n", host)
+			scanPorts(host, cfg)
+			fmt.Println()
+		}
+	} else {
+		scanPorts(cfg.TargetIP, cfg)
+	}
+}
+
+///////////////////////////////////////////////////
+// Networking & Scanning functions (Refactored)
+///////////////////////////////////////////////////
+
+// expandCIDRはCIDR表記からIPアドレスのスライスを返す
 func expandCIDR(cidr string) []string {
 	ip, ipnet, err := net.ParseCIDR(cidr)
 	if err != nil {
 		log.Fatalf("Invalid CIDR: %v", err)
 	}
-
 	var ips []string
 	for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); incrementIP(ip) {
 		ips = append(ips, ip.String())
 	}
-
 	if len(ips) > 0 {
 		ips = ips[1:]
 	}
-
 	if len(ips) > 0 {
 		ips = ips[:len(ips)-1]
 	}
 	return ips
 }
 
+// incrementIPはIPアドレスをインクリメントする
 func incrementIP(ip net.IP) {
 	for i := len(ip) - 1; i >= 0; i-- {
 		ip[i]++
@@ -215,30 +186,28 @@ func incrementIP(ip net.IP) {
 	}
 }
 
-func discoverHosts(hosts []string) []string {
+// discoverHostsは各ホストにpingし、Linuxの場合はARPスキャンも実施する
+func discoverHosts(hosts []string, cfg *Config) []string {
 	var discoveredHosts []string
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-
-	sem := semaphore.NewWeighted(workerCount)
+	sem := semaphore.NewWeighted(cfg.WorkerCount)
 	ctx := context.Background()
-
 	for _, host := range hosts {
 		wg.Add(1)
 		sem.Acquire(ctx, 1)
 		go func(ip string) {
 			defer wg.Done()
 			defer sem.Release(1)
-
-			alive := pingHost(ip)
+			alive := pingHost(ip, cfg.Timeout, cfg.Verbose)
 			if !alive && isLinux() {
-				alive = arpScan(ip)
+				alive = arpScan(ip, cfg)
 			}
 			if alive {
 				mu.Lock()
 				discoveredHosts = append(discoveredHosts, ip)
 				mu.Unlock()
-				if verbose {
+				if cfg.Verbose {
 					fmt.Printf("Host discovered: %s\n", ip)
 				}
 			}
@@ -248,7 +217,8 @@ func discoverHosts(hosts []string) []string {
 	return discoveredHosts
 }
 
-func pingHost(ip string) bool {
+// pingHostはICMPパケットでホストの生存を確認する
+func pingHost(ip string, timeout time.Duration, verbose bool) bool {
 	conn, err := icmp.ListenPacket("ipv4:icmp", "0.0.0.0")
 	if err != nil {
 		if verbose {
@@ -257,7 +227,6 @@ func pingHost(ip string) bool {
 		return false
 	}
 	defer conn.Close()
-
 	vm := icmp.Message{
 		Type: ipv4.ICMPTypeEcho, Code: 0,
 		Body: &icmp.Echo{
@@ -265,50 +234,42 @@ func pingHost(ip string) bool {
 			Data: []byte("PING-PONG:D"),
 		},
 	}
-
 	wb, err := vm.Marshal(nil)
 	if err != nil {
 		return false
 	}
-
 	if _, err := conn.WriteTo(wb, &net.IPAddr{IP: net.ParseIP(ip)}); err != nil {
 		return false
 	}
-
 	rb := make([]byte, 1500)
 	conn.SetReadDeadline(time.Now().Add(timeout))
 	n, _, err := conn.ReadFrom(rb)
 	if err != nil {
 		return false
 	}
-
 	rm, err := icmp.ParseMessage(1, rb[:n])
 	if err != nil {
 		return false
 	}
-
-	if rm.Type == ipv4.ICMPTypeEchoReply {
-		return true
-	}
-	return false
+	return rm.Type == ipv4.ICMPTypeEchoReply
 }
 
-func arpScan(ip string) bool {
-	iface := selectInterface()
+// arpScanはgopacketを用いてARPスキャンを実施する
+func arpScan(ip string, cfg *Config) bool {
+	iface := selectInterface(cfg)
 	switch runtime.GOOS {
 	case "linux":
-		// gopacketでARPリクエスト送信・応答受信
-		return arpScanGopacket(iface, ip)
+		return arpScanGopacket(iface, ip, cfg.Timeout, cfg.Verbose)
 	case "darwin", "windows":
-		return arpScanGopacket(iface, ip)
+		return arpScanGopacket(iface, ip, cfg.Timeout, cfg.Verbose)
 	default:
 		fmt.Println("このOSには対応していません")
 		return false
 	}
 }
 
-// gopacketを使ったARPリクエスト送信・応答受信の雛形
-func arpScanGopacket(ifaceName, targetIP string) bool {
+// arpScanGopacketはARPリクエスト送信・応答受信を行う
+func arpScanGopacket(ifaceName, targetIP string, timeout time.Duration, verbose bool) bool {
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
 		fmt.Printf("インターフェース %s が見つかりません: %v\n", ifaceName, err)
@@ -359,6 +320,7 @@ func arpScanGopacket(ifaceName, targetIP string) bool {
 		DstHwAddress:      []byte{0, 0, 0, 0, 0, 0},
 		DstProtAddress:    []byte(target.To4()),
 	}
+
 	buf := gopacket.NewSerializeBuffer()
 	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
 	if err := gopacket.SerializeLayers(buf, opts, &eth, &arpLayer); err != nil {
@@ -389,102 +351,95 @@ func arpScanGopacket(ifaceName, targetIP string) bool {
 	}
 }
 
-func attemptConnect(ip string, port int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", ip, port), timeout)
-	if err != nil {
-		conn.Close()
-		return true
-	}
-	return false
-}
-
-func scanPorts(ip string) {
+// scanPortsは対象ホストのポートスキャンを実行する
+func scanPorts(ip string, cfg *Config) {
 	var wg sync.WaitGroup
-	sem := semaphore.NewWeighted(workerCount)
+	sem := semaphore.NewWeighted(cfg.WorkerCount)
 	ctx := context.Background()
-
-	fmt.Printf("Start scan on port %d-%d for %s\n", startPort, endPort, ip)
-	startPort := time.Now()
-	switch strings.ToLower(protocol) {
+	fmt.Printf("Start scan on port %d-%d for %s\n", cfg.StartPort, cfg.EndPort, ip)
+	startTime := time.Now()
+	switch strings.ToLower(cfg.Protocol) {
 	case "tcp":
-		scanTCPPorts(ip, &wg, sem, ctx)
+		scanTCPPorts(ip, &wg, sem, ctx, cfg)
 	case "udp":
-		scanUDPPorts(ip, &wg, sem, ctx)
+		scanUDPPorts(ip, &wg, sem, ctx, cfg)
 	case "both":
-		scanTCPPorts(ip, &wg, sem, ctx)
-		scanUDPPorts(ip, &wg, sem, ctx)
+		scanTCPPorts(ip, &wg, sem, ctx, cfg)
+		scanUDPPorts(ip, &wg, sem, ctx, cfg)
 	default:
 		fmt.Println("Invalid protocol, will use TCP.")
-		scanTCPPorts(ip, &wg, sem, ctx)
+		scanTCPPorts(ip, &wg, sem, ctx, cfg)
 	}
 	wg.Wait()
-	elapsed := time.Since(startPort)
+	elapsed := time.Since(startTime)
 	fmt.Printf("Scan completed in %s\n", elapsed)
 }
 
-func scanTCPPorts(ip string, wg *sync.WaitGroup, sem *semaphore.Weighted, ctx context.Context) {
-	for port := startPort; port <= endPort; port++ {
+// scanTCPPortsはTCPポートスキャンを実施する
+func scanTCPPorts(ip string, wg *sync.WaitGroup, sem *semaphore.Weighted, ctx context.Context, cfg *Config) {
+	for port := cfg.StartPort; port <= cfg.EndPort; port++ {
 		wg.Add(1)
 		sem.Acquire(ctx, 1)
 		go func(port int) {
 			defer wg.Done()
 			defer sem.Release(1)
-			switch strings.ToLower(scanType) {
+			switch strings.ToLower(cfg.ScanType) {
 			case "connect":
-				scanTCPConnect(ip, port)
+				scanTCPConnect(ip, port, cfg)
 			case "syn":
-				scanTCPSyn(ip, port)
+				scanTCPSyn(ip, port, cfg)
 			default:
-				scanTCPConnect(ip, port)
+				scanTCPConnect(ip, port, cfg)
 			}
 		}(port)
 	}
 }
 
-func scanUDPPorts(ip string, wg *sync.WaitGroup, sem *semaphore.Weighted, ctx context.Context) {
-	for port := startPort; port <= endPort; port++ {
+// scanTCPConnectはTCPコネクトスキャンを実施する
+func scanTCPConnect(ip string, port int, cfg *Config) {
+	target := fmt.Sprintf("%s:%d", ip, port)
+	conn, err := net.DialTimeout("tcp", target, cfg.Timeout)
+	if err == nil {
+		service := getServiceName("tcp", port)
+		fmt.Printf("TCP %d\topen\t%s\n", port, service)
+		conn.Close()
+	} else if cfg.Verbose {
+		fmt.Printf("TCP %d\tclose\n", port)
+	}
+}
+
+// scanTCPSynはSYNスキャンを実施する。root権限がない場合はConnect Scanにフォールバックする
+func scanTCPSyn(ip string, port int, cfg *Config) {
+	if os.Getuid() != 0 {
+		if port == cfg.StartPort {
+			fmt.Println("SYN scan requires root privileges. Connect scan will be used instead.")
+		}
+		scanTCPConnect(ip, port, cfg)
+		return
+	}
+	// 現状はConnect Scanと同等の実装（実際のSYNスキャン実装は別途検討）
+	scanTCPConnect(ip, port, cfg)
+}
+
+// scanUDPPortsはUDPポートスキャンを実施する
+func scanUDPPorts(ip string, wg *sync.WaitGroup, sem *semaphore.Weighted, ctx context.Context, cfg *Config) {
+	for port := cfg.StartPort; port <= cfg.EndPort; port++ {
 		wg.Add(1)
 		sem.Acquire(ctx, 1)
 		go func(port int) {
 			defer wg.Done()
 			defer sem.Release(1)
-			scanUDP(ip, port)
+			scanUDP(ip, port, cfg)
 		}(port)
 	}
 }
 
-func scanTCPConnect(ip string, port int) {
+// scanUDPはUDPスキャンを1ポートごとに実施する
+func scanUDP(ip string, port int, cfg *Config) {
 	target := fmt.Sprintf("%s:%d", ip, port)
-	conn, err := net.DialTimeout("tcp", target, timeout)
+	conn, err := net.DialTimeout("udp", target, cfg.Timeout)
 	if err == nil {
-		service := getServiceName("tcp", port)
-		fmt.Printf("TCP %d\topen\t%s\n", port, service)
-		conn.Close()
-	} else if verbose {
-		fmt.Printf("TCP %d\tclose\n", port)
-	}
-}
-
-func scanTCPSyn(ip string, port int) {
-	// SYNスキャンにはroot権限とraw socketが必要
-	if os.Getuid() != 0 {
-		if port == startPort {
-			fmt.Println("SYN scan requires root privileges. Connect scan will be used instead.")
-		}
-		scanTCPConnect(ip, port)
-		return
-	}
-
-	// TODO SYNスキャンをどうするか？libpcapのライブラリが必要
-	// とりあえずConnect Scanを使用
-	scanTCPConnect(ip, port)
-}
-
-func scanUDP(ip string, port int) {
-	target := fmt.Sprintf("%s:%d", ip, port)
-	conn, err := net.DialTimeout("udp", target, timeout)
-	if err == nil {
-		if verbose {
+		if cfg.Verbose {
 			fmt.Printf("UDP %d\tunreachable\n", port)
 		}
 		return
@@ -495,18 +450,19 @@ func scanUDP(ip string, port int) {
 		conn.Close()
 		return
 	}
-	conn.SetReadDeadline(time.Now().Add(timeout))
+	conn.SetReadDeadline(time.Now().Add(cfg.Timeout))
 	resp := make([]byte, 1024)
 	n, err := conn.Read(resp)
 	if err == nil && n > 0 {
 		service := getServiceName("udp", port)
 		fmt.Printf("UDP %d\topen\t%s\n", port, service)
-	} else if verbose {
+	} else if cfg.Verbose {
 		fmt.Printf("UDP %d\tunknown/filtered\n", port)
 	}
 	conn.Close()
 }
 
+// createUDPProbeはポートに応じたUDPプローブペイロードを返す
 func createUDPProbe(port int) []byte {
 	switch port {
 	case 53: // DNS
@@ -516,13 +472,12 @@ func createUDPProbe(port int) []byte {
 	case 161: // SNMP
 		return []byte{0x30, 0x26, 0x02, 0x01, 0x01, 0x04, 0x06, 0x70, 0x75, 0x62, 0x6c, 0x69, 0x63}
 	default:
-		// 一般的なプローブ
 		return []byte("HELLO")
 	}
 }
 
+// getServiceNameはプロトコルとポートに応じたサービス名を返す
 func getServiceName(protocol string, port int) string {
-	// OSのservices DBを使用するべきか
 	services := map[string]map[int]string{
 		"tcp": {
 			21:   "FTP",
@@ -543,7 +498,6 @@ func getServiceName(protocol string, port int) string {
 			1900: "UPnP",
 		},
 	}
-
 	if serviceMap, ok := services[protocol]; ok {
 		if name, ok := serviceMap[port]; ok {
 			return name
@@ -552,20 +506,22 @@ func getServiceName(protocol string, port int) string {
 	return ""
 }
 
+// isLinuxは環境変数によりLinuxかどうかを判定する
 func isLinux() bool {
 	return os.Getenv("OS") != "Windows_NT"
 }
 
-func selectInterface() string {
-	if ifaceName != "" {
-		return ifaceName
+// selectInterfaceは利用可能なインターフェースを自動選択または対話的に選択する
+func selectInterface(cfg *Config) string {
+	if cfg.IfaceName != "" {
+		return cfg.IfaceName
 	}
 	devices, err := pcap.FindAllDevs()
 	if err != nil {
 		fmt.Printf("インターフェース列挙に失敗: %v\n", err)
 		os.Exit(1)
 	}
-	candidates := []pcap.Interface{}
+	var candidates []pcap.Interface
 	for _, dev := range devices {
 		if strings.Contains(dev.Name, "lo") {
 			continue
