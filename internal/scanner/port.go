@@ -79,7 +79,7 @@ func scanTCPConnect(ip string, port int, cfg *Config) {
 	target := fmt.Sprintf("%s:%d", ip, port)
 	conn, err := net.DialTimeout("tcp", target, cfg.Timeout)
 	if err == nil {
-		service := getServiceName("tcp", port)
+		service := GetServiceName("tcp", port)
 		fmt.Printf("TCP %d\topen\t%s\n", port, service)
 		conn.Close()
 	} else if cfg.Verbose {
@@ -103,7 +103,7 @@ func scanUDP(ip string, port int, cfg *Config) {
 		}
 		return
 	}
-	payload := createUDPProbe(port)
+	payload := CreateUDPProbe(port)
 	_, err = conn.Write(payload)
 	if err != nil {
 		conn.Close()
@@ -113,7 +113,7 @@ func scanUDP(ip string, port int, cfg *Config) {
 	resp := make([]byte, 1024)
 	n, err := conn.Read(resp)
 	if err == nil && n > 0 {
-		service := getServiceName("udp", port)
+		service := GetServiceName("udp", port)
 		fmt.Printf("UDP %d\topen\t%s\n", port, service)
 	} else if cfg.Verbose {
 		fmt.Printf("UDP %d\tunknown/filtered\n", port)
@@ -121,20 +121,7 @@ func scanUDP(ip string, port int, cfg *Config) {
 	conn.Close()
 }
 
-func createUDPProbe(port int) []byte {
-	switch port {
-	case 53: // DNS
-		return []byte{0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
-	case 123: // NTP
-		return []byte{0x1b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
-	case 161: // SNMP
-		return []byte{0x30, 0x26, 0x02, 0x01, 0x01, 0x04, 0x06, 0x70, 0x75, 0x62, 0x6c, 0x69, 0x63}
-	default:
-		return []byte("HELLO")
-	}
-}
-
-func getServiceName(protocol string, port int) string {
+func GetServiceName(protocol string, port int) string {
 	services := map[string]map[int]string{
 		"tcp": {
 			21:   "FTP",
@@ -161,4 +148,17 @@ func getServiceName(protocol string, port int) string {
 		}
 	}
 	return ""
+}
+
+func CreateUDPProbe(port int) []byte {
+	switch port {
+	case 53: // DNS
+		return []byte{0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	case 123: // NTP
+		return []byte{0x1b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	case 161: // SNMP
+		return []byte{0x30, 0x26, 0x02, 0x01, 0x01, 0x04, 0x06, 0x70, 0x75, 0x62, 0x6c, 0x69, 0x63}
+	default:
+		return []byte("HELLO")
+	}
 }
