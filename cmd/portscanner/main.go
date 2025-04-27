@@ -1,20 +1,16 @@
 package main
 
 import (
-	"context"
 	"fmt"
-	"log"
-	"net"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/divergen371/NetAudit/internal/config"
+	"github.com/divergen371/NetAudit/internal/network"
 	"github.com/divergen371/NetAudit/internal/scanner"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/sync/semaphore"
 )
 
 var cfg config.Config
@@ -75,9 +71,9 @@ func adjustSettings(cfg *config.Config) {
 // runScanは設定に基づいてスキャン処理を実行する
 func runScan(cfg *config.Config) {
 	if strings.Contains(cfg.TargetIP, "/") {
-		hosts := expandCIDR(cfg.TargetIP)
+		hosts := network.ExpandCIDR(cfg.TargetIP)
 		fmt.Printf("ネットワーク %s 内のホストを探索中...\n", cfg.TargetIP)
-		discoveredHosts := discoverHosts(hosts, cfg)
+		discoveredHosts := scanner.DiscoverHosts(hosts, cfg)
 		if len(discoveredHosts) == 0 {
 			fmt.Println("アクティブなホストが見つかりませんでした")
 			return
@@ -109,82 +105,4 @@ func runScan(cfg *config.Config) {
 		}
 		scanner.ScanPorts(cfg.TargetIP, scannerCfg)
 	}
-}
-
-///////////////////////////////////////////////////
-// Networking & Scanning functions (Refactored)
-///////////////////////////////////////////////////
-
-// expandCIDRはCIDR表記からIPアドレスのスライスを返す
-func expandCIDR(cidr string) []string {
-	ip, ipnet, err := net.ParseCIDR(cidr)
-	if err != nil {
-		log.Fatalf("Invalid CIDR: %v", err)
-	}
-	var ips []string
-	for curIP := ip.Mask(ipnet.Mask); ipnet.Contains(curIP); incrementIP(curIP) {
-		ips = append(ips, curIP.String())
-	}
-	if len(ips) > 0 {
-		ips = ips[1:]
-	}
-	if len(ips) > 0 {
-		ips = ips[:len(ips)-1]
-	}
-	return ips
-}
-
-// incrementIPはIPアドレスをインクリメントする
-func incrementIP(ip net.IP) {
-	for i := len(ip) - 1; i >= 0; i-- {
-		ip[i]++
-		if ip[i] > 0 {
-			break
-		}
-	}
-}
-
-// discoverHostsは各ホストにpingし、Linuxの場合はARPスキャンも実施する
-func discoverHosts(hosts []string, cfg *config.Config) []string {
-	var discoveredHosts []string
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	sem := semaphore.NewWeighted(cfg.WorkerCount)
-	ctx := context.Background()
-	for _, host := range hosts {
-		wg.Add(1)
-		sem.Acquire(ctx, 1)
-		go func(ip string) {
-			defer wg.Done()
-			defer sem.Release(1)
-			icmpCfg := &scanner.ICMPConfig{
-				Timeout: cfg.Timeout,
-				Verbose: cfg.Verbose,
-			}
-			alive := scanner.PingHost(ip, icmpCfg)
-			if !alive && isLinux() {
-				arpCfg := &scanner.ARPConfig{
-					IfaceName: cfg.IfaceName,
-					Timeout:   cfg.Timeout,
-					Verbose:   cfg.Verbose,
-				}
-				alive = scanner.ARPScan(ip, arpCfg)
-			}
-			if alive {
-				mu.Lock()
-				discoveredHosts = append(discoveredHosts, ip)
-				mu.Unlock()
-				if cfg.Verbose {
-					fmt.Printf("Host discovered: %s\n", ip)
-				}
-			}
-		}(host)
-	}
-	wg.Wait()
-	return discoveredHosts
-}
-
-// isLinuxは環境変数によりLinuxかどうかを判定する
-func isLinux() bool {
-	return os.Getenv("OS") != "Windows_NT"
 }
