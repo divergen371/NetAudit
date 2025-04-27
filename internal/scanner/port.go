@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -21,30 +22,41 @@ type Config struct {
 	Verbose     bool
 }
 
-func ScanPorts(ip string, cfg *Config) {
+// PortScannerインターフェースを定義
+// io.Writerに出力を書き込む
+// internal/scanner/scanner.goに移動しても良い
+
+type PortScanner interface {
+	ScanPorts(w io.Writer, ip string, cfg *Config)
+}
+
+type RealPortScanner struct{}
+
+func (r *RealPortScanner) ScanPorts(w io.Writer, ip string, cfg *Config) {
 	var wg sync.WaitGroup
 	sem := semaphore.NewWeighted(cfg.WorkerCount)
 	ctx := context.Background()
-	fmt.Printf("Start scan on port %d-%d for %s\n", cfg.StartPort, cfg.EndPort, ip)
+	fmt.Fprintf(w, "Start scan on port %d-%d for %s\n", cfg.StartPort, cfg.EndPort, ip)
 	startTime := time.Now()
 	switch strings.ToLower(cfg.Protocol) {
 	case "tcp":
-		scanTCPPorts(ip, &wg, sem, ctx, cfg)
+		scanTCPPorts(w, ip, &wg, sem, ctx, cfg)
 	case "udp":
-		scanUDPPorts(ip, &wg, sem, ctx, cfg)
+		scanUDPPorts(w, ip, &wg, sem, ctx, cfg)
 	case "both":
-		scanTCPPorts(ip, &wg, sem, ctx, cfg)
-		scanUDPPorts(ip, &wg, sem, ctx, cfg)
+		scanTCPPorts(w, ip, &wg, sem, ctx, cfg)
+		scanUDPPorts(w, ip, &wg, sem, ctx, cfg)
 	default:
-		fmt.Println("Invalid protocol, will use TCP.")
-		scanTCPPorts(ip, &wg, sem, ctx, cfg)
+		fmt.Fprintln(w, "Invalid protocol, will use TCP.")
+		scanTCPPorts(w, ip, &wg, sem, ctx, cfg)
 	}
 	wg.Wait()
 	elapsed := time.Since(startTime)
-	fmt.Printf("Scan completed in %s\n", elapsed)
+	fmt.Fprintf(w, "Scan completed in %s\n", elapsed)
 }
 
-func scanTCPPorts(ip string, wg *sync.WaitGroup, sem *semaphore.Weighted, ctx context.Context, cfg *Config) {
+// scanTCPPorts/scanUDPPorts/scanTCPConnect/scanTCPSyn/scanUDP もio.Writerを受け取るように修正
+func scanTCPPorts(w io.Writer, ip string, wg *sync.WaitGroup, sem *semaphore.Weighted, ctx context.Context, cfg *Config) {
 	for port := cfg.StartPort; port <= cfg.EndPort; port++ {
 		wg.Add(1)
 		sem.Acquire(ctx, 1)
@@ -53,53 +65,53 @@ func scanTCPPorts(ip string, wg *sync.WaitGroup, sem *semaphore.Weighted, ctx co
 			defer sem.Release(1)
 			switch strings.ToLower(cfg.ScanType) {
 			case "connect":
-				scanTCPConnect(ip, port, cfg)
+				scanTCPConnect(w, ip, port, cfg)
 			case "syn":
-				scanTCPSyn(ip, port, cfg)
+				scanTCPSyn(w, ip, port, cfg)
 			default:
-				scanTCPConnect(ip, port, cfg)
+				scanTCPConnect(w, ip, port, cfg)
 			}
 		}(port)
 	}
 }
 
-func scanUDPPorts(ip string, wg *sync.WaitGroup, sem *semaphore.Weighted, ctx context.Context, cfg *Config) {
+func scanUDPPorts(w io.Writer, ip string, wg *sync.WaitGroup, sem *semaphore.Weighted, ctx context.Context, cfg *Config) {
 	for port := cfg.StartPort; port <= cfg.EndPort; port++ {
 		wg.Add(1)
 		sem.Acquire(ctx, 1)
 		go func(port int) {
 			defer wg.Done()
 			defer sem.Release(1)
-			scanUDP(ip, port, cfg)
+			scanUDP(w, ip, port, cfg)
 		}(port)
 	}
 }
 
-func scanTCPConnect(ip string, port int, cfg *Config) {
+func scanTCPConnect(w io.Writer, ip string, port int, cfg *Config) {
 	target := fmt.Sprintf("%s:%d", ip, port)
 	conn, err := net.DialTimeout("tcp", target, cfg.Timeout)
 	if err == nil {
 		service := GetServiceName("tcp", port)
-		fmt.Printf("TCP %d\topen\t%s\n", port, service)
+		fmt.Fprintf(w, "TCP %d\topen\t%s\n", port, service)
 		conn.Close()
 	} else if cfg.Verbose {
-		fmt.Printf("TCP %d\tclose\n", port)
+		fmt.Fprintf(w, "TCP %d\tclose\n", port)
 	}
 }
 
-func scanTCPSyn(ip string, port int, cfg *Config) {
+func scanTCPSyn(w io.Writer, ip string, port int, cfg *Config) {
 	if port == cfg.StartPort {
-		fmt.Println("SYN scan requires root privileges. Connect scan will be used instead.")
+		fmt.Fprintln(w, "SYN scan requires root privileges. Connect scan will be used instead.")
 	}
-	scanTCPConnect(ip, port, cfg)
+	scanTCPConnect(w, ip, port, cfg)
 }
 
-func scanUDP(ip string, port int, cfg *Config) {
+func scanUDP(w io.Writer, ip string, port int, cfg *Config) {
 	target := fmt.Sprintf("%s:%d", ip, port)
 	conn, err := net.DialTimeout("udp", target, cfg.Timeout)
 	if err == nil {
 		if cfg.Verbose {
-			fmt.Printf("UDP %d\tunreachable\n", port)
+			fmt.Fprintf(w, "UDP %d\tunreachable\n", port)
 		}
 		return
 	}
@@ -114,9 +126,9 @@ func scanUDP(ip string, port int, cfg *Config) {
 	n, err := conn.Read(resp)
 	if err == nil && n > 0 {
 		service := GetServiceName("udp", port)
-		fmt.Printf("UDP %d\topen\t%s\n", port, service)
+		fmt.Fprintf(w, "UDP %d\topen\t%s\n", port, service)
 	} else if cfg.Verbose {
-		fmt.Printf("UDP %d\tunknown/filtered\n", port)
+		fmt.Fprintf(w, "UDP %d\tunknown/filtered\n", port)
 	}
 	conn.Close()
 }
@@ -161,4 +173,15 @@ func CreateUDPProbe(port int) []byte {
 	default:
 		return []byte("HELLO")
 	}
+}
+
+// ===== テスト用モック実装 =====
+// 任意の出力やエラーを注入できるようにする
+
+type MockPortScanner struct {
+	MockOutput string
+}
+
+func (m *MockPortScanner) ScanPorts(w io.Writer, ip string, cfg *Config) {
+	w.Write([]byte(m.MockOutput))
 }

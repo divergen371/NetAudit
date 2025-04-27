@@ -1,0 +1,21 @@
+# 2025/04/28 03:18:58.347224 [TestPortscanner_CLI_Property_Valid] [rapid] draw ip: 1
+# 2025/04/28 03:18:58.347248 [TestPortscanner_CLI_Property_Valid] [rapid] draw startPort: 24908
+# 2025/04/28 03:18:58.347255 [TestPortscanner_CLI_Property_Valid] [rapid] draw endPort: 25111
+# 2025/04/28 03:18:58.347288 [TestPortscanner_CLI_Property_Valid] [rapid] draw scanType: "udp"
+# 2025/04/28 03:18:58.347292 [TestPortscanner_CLI_Property_Valid] [rapid] draw protocol: "tcp"
+# 2025/04/28 03:19:03.355312 [TestPortscanner_CLI_Property_Valid] 期待する出力が含まれない: 
+# 
+v0.4.8#14278589813021306673
+0x0
+0x0
+0x0
+0x1cbe8f7e70584b
+0x19cb315616e582
+0x614b
+0x155d3ab44f874d
+0x115185d31f2868
+0xca
+0x124277e2a05243
+0x2
+0x3e517d99b7fed
+0x0

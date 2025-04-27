@@ -15,17 +15,32 @@ import (
 
 var Cfg config.Config
 
+// PortScannerインターフェースのグローバル変数
+var portScanner scanner.PortScanner = &scanner.RealPortScanner{}
+
+// テスト用に差し替え可能にするためのSetter
+func SetPortScanner(s scanner.PortScanner) {
+	portScanner = s
+}
+
+// テスト用: os.Exitを抑制するフラグ
+var TestMode = false
+
 var RootCmd = &cobra.Command{
 	Use:   "portscanner",
 	Short: "シンプルなポートスキャナ",
 	Long:  "IPアドレスやCIDR範囲を指定してポートスキャンを行うツールです.",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := config.ValidateConfig(&Cfg); err != nil {
-			fmt.Println(err)
-			os.Exit(1)
+			fmt.Fprintln(cmd.OutOrStderr(), err)
+			if !TestMode {
+				os.Exit(1)
+			}
+			return err
 		}
 		adjustSettings(&Cfg)
-		runScan(&Cfg)
+		runScan(cmd, &Cfg)
+		return nil
 	},
 }
 
@@ -67,18 +82,18 @@ func adjustSettings(cfg *config.Config) {
 	}
 }
 
-func runScan(cfg *config.Config) {
+func runScan(cmd *cobra.Command, cfg *config.Config) {
 	if strings.Contains(cfg.TargetIP, "/") {
 		hosts := network.ExpandCIDR(cfg.TargetIP)
-		fmt.Printf("ネットワーク %s 内のホストを探索中...\n", cfg.TargetIP)
+		fmt.Fprintf(cmd.OutOrStdout(), "ネットワーク %s 内のホストを探索中...\n", cfg.TargetIP)
 		discoveredHosts := scanner.DiscoverHosts(hosts, cfg)
 		if len(discoveredHosts) == 0 {
-			fmt.Println("アクティブなホストが見つかりませんでした")
+			fmt.Fprintln(cmd.OutOrStdout(), "アクティブなホストが見つかりませんでした")
 			return
 		}
-		fmt.Printf("%d台のアクティブホストを発見しました\n", len(discoveredHosts))
+		fmt.Fprintf(cmd.OutOrStdout(), "%d台のアクティブホストを発見しました\n", len(discoveredHosts))
 		for _, host := range discoveredHosts {
-			fmt.Printf("ホスト %s のポートスキャンを開始します\n", host)
+			fmt.Fprintf(cmd.OutOrStdout(), "ホスト %s のポートスキャンを開始します\n", host)
 			scannerCfg := &scanner.Config{
 				StartPort:   cfg.StartPort,
 				EndPort:     cfg.EndPort,
@@ -88,8 +103,8 @@ func runScan(cfg *config.Config) {
 				WorkerCount: cfg.WorkerCount,
 				Verbose:     cfg.Verbose,
 			}
-			scanner.ScanPorts(host, scannerCfg)
-			fmt.Println()
+			portScanner.ScanPorts(cmd.OutOrStdout(), host, scannerCfg)
+			fmt.Fprintln(cmd.OutOrStdout())
 		}
 	} else {
 		scannerCfg := &scanner.Config{
@@ -101,6 +116,6 @@ func runScan(cfg *config.Config) {
 			WorkerCount: cfg.WorkerCount,
 			Verbose:     cfg.Verbose,
 		}
-		scanner.ScanPorts(cfg.TargetIP, scannerCfg)
+		portScanner.ScanPorts(cmd.OutOrStdout(), cfg.TargetIP, scannerCfg)
 	}
 }
