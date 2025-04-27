@@ -142,7 +142,8 @@ func detectOSByTTL(ip string) string {
 	msg := []byte{
 		8, 0, 0, 0, 0, 13, 0, 37, // type, code, checksum, id, seq
 	}
-	if _, err := conn.Write(msg); err != nil {
+	_, err = conn.Write(msg)
+	if err != nil {
 		return "unknown"
 	}
 
